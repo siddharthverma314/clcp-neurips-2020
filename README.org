@@ -1,8 +1,8 @@
 #+TITLE: Learning Skillful Resets
 
 * Overview
-This repository contains the code for the paper [[https://example.com][Learning Skillful
-Resets: Acquisition of Behaviors via Reset-Free Games]].
+This repository contains the code for the paper [[https://example.com][Continual Learning of
+Control Primitives: Acquisition of Behaviors via Reset-Games]].
 
 * Running the baselines
 Run =python setup.py develop= within =ant-hrl-maze= if you are not
