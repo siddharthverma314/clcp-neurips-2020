@@ -1,0 +1,3 @@
+*.pkl
+*.tar.gz
+__pycache__/

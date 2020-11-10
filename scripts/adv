@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+
+from adversarial.env import DiaynWrapper, VideoWrapper
+from adversarial.diayn import DiscreteDiayn, ContinuousDiayn
+from adversarial.sampler import AdversarialSampler
+from adversarial.env import make_env
+from adversarial.algo import SAC
+from pyrl.actor import TanhGaussianActor
+from pyrl.critic import DoubleQCritic
+from pyrl.replay_buffer import ReplayBuffer
+from pyrl.utils import collate
+from pyrl.transforms import Flatten
+from PIL import Image, ImageDraw
+from pyrl.sampler import BaseSampler
+from pyrl.logger import logger, Hyperparams
+import argparse
+from skvideo.io import vwrite
+import ant_hrl_maze
+import numpy as np
+import torch
+import copy
+
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+
+
+###################
+# PARSE ARGUMENTS #
+###################
+
+parser = argparse.ArgumentParser()
+
+# sample params
+parser.add_argument("--env-name", type=str, default="Ant-v4")
+parser.add_argument("--eval-env-name", type=str, default="Ant-v4")
+parser.add_argument("--alice-path-length", type=int, default=200)
+parser.add_argument("--bob-path-length", type=int, default=200)
+
+# adversarial params
+parser.add_argument("--use-q-fn", action="store_true")
+
+# general params
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--hidden-dim", type=str, default="256,256")
+parser.add_argument("--batch-size", type=int, default=256)
+
+# diayn params
+parser.add_argument("--continuous", action="store_true", default=False)
+parser.add_argument("--num-skills", type=int, default=10)
+parser.add_argument("--reward-weight", type=float, default=1)
+parser.add_argument("--xy-prior", action="store_true", default=False)
+
+# sac params
+parser.add_argument("--init-temperature", type=float, default=0.1)
+
+# train params
+parser.add_argument("--num-epochs", type=int, default=1000)
+parser.add_argument("--num-pretrain", type=int, default=10)
+parser.add_argument("--sample-repeats", type=int, default=1)
+parser.add_argument("--alice-train-repeats", type=int, default=50)
+parser.add_argument("--bob-train-repeats", type=int, default=50)
+parser.add_argument("--eval-repeats", type=int, default=5)
+parser.add_argument("--save-video-offset", type=int, default=50)
+
+# logging params
+parser.add_argument("--logdir", type=str, required=True)
+
+args = parser.parse_args()
+args.hidden_dim = [int(d) for d in args.hidden_dim.split(",")]
+
+env = make_env(args.env_name, args.device)
+eval_env = make_env(args.eval_env_name, args.device)
+
+
+#########
+# ALICE #
+#########
+
+if args.continuous:
+    diayn_class = ContinuousDiayn
+else:
+    diayn_class = DiscreteDiayn
+alice_diayn = diayn_class(
+    env.observation_space,
+    args.hidden_dim,
+    args.num_skills,
+    args.reward_weight,
+    _device=args.device,
+    _truncate=2 if args.xy_prior else None,
+)
+alice_eval_diayn = copy.deepcopy(alice_diayn)
+alice_eval_diayn.model = alice_diayn.model
+alice_env = DiaynWrapper(env, alice_diayn)
+alice_eval_env = DiaynWrapper(eval_env, alice_diayn)
+alice_act = TanhGaussianActor(
+    alice_env.observation_space,
+    alice_env.action_space,
+    args.hidden_dim,
+)
+alice_crt = DoubleQCritic(
+    alice_env.observation_space, alice_env.action_space, args.hidden_dim
+)
+alice_algo = SAC(
+    actor=alice_act,
+    critic=alice_crt,
+    _device=args.device,
+    _act_dim=0,  # not needed because we are not learning temperature
+    _learnable_temperature=False,
+    _init_temperature=args.init_temperature,
+)
+alice_sampler = BaseSampler(
+    alice_act.action,
+    env=alice_env,
+    _path_length=args.alice_path_length
+)
+alice_rb = ReplayBuffer(
+    alice_env.observation_space, alice_env.action_space, int(1e6), args.batch_size, args.device
+)
+
+#######
+# BOB #
+#######
+
+bob_env = env
+bob_eval_env = eval_env
+bob_act = TanhGaussianActor(
+    bob_env.observation_space,
+    bob_env.action_space,
+    args.hidden_dim,
+)
+bob_crt = DoubleQCritic(
+    bob_env.observation_space, bob_env.action_space, args.hidden_dim
+)
+bob_algo = SAC(
+    actor=bob_act,
+    critic=bob_crt,
+    _device=args.device,
+    _act_dim=Flatten(bob_env.action_space).dim,
+    _learnable_temperature=True,
+    _init_temperature=args.init_temperature,
+)
+bob_sampler = BaseSampler(
+    bob_act.action,
+    env=bob_env,
+    _path_length=args.bob_path_length
+)
+bob_rb = ReplayBuffer(
+    bob_env.observation_space, bob_env.action_space, int(1e6), args.batch_size, args.device
+)
+
+
+sampler = AdversarialSampler(alice_sampler, bob_sampler, 1)
+
+#################
+# SETUP LOGGING #
+#################
+
+logger.initialize(
+    {
+        "alice": alice_algo,
+        "bob": bob_algo,
+        "sampler": sampler,
+        "alice_replay_buffer": alice_rb,
+        "bob_replay_buffer": bob_rb,
+        "alice_diayn": alice_diayn,
+        "alice_eval_diayn": alice_eval_diayn,
+        "args": Hyperparams(vars(args)),
+    },
+    args.logdir,
+)
+logger.log_hyperparameters()
+(logger.logdir / "videos").mkdir()
+(logger.logdir / "plots").mkdir()
+
+
+def write_adv_video_and_plot(i, j):
+    a_env = VideoWrapper(alice_eval_env)
+    b_env = VideoWrapper(bob_eval_env)
+    alice_sampler = BaseSampler(
+        lambda x: alice_act.action(x, True),
+        env=a_env,
+        _path_length=args.alice_path_length
+    )
+    bob_sampler = BaseSampler(
+        lambda x: bob_act.action(x, True),
+        env=b_env,
+        _path_length=args.bob_path_length
+    )
+    sampler = AdversarialSampler(alice_sampler, bob_sampler, 1)
+    if isinstance(alice_diayn, DiscreteDiayn):
+        with alice_diayn.with_z(j):
+            alice_batch, bob_batch = sampler.sample()
+    else:
+        alice_batch, bob_batch = sampler.sample()
+    path = logger.logdir / "videos" / f"adversarial_{i}_{j}.mp4"
+    logger.log("Saving video to path {}".format(path))
+
+    def make_banner(text, banner_width=30):
+        banner = Image.new("RGB", (a_env.video[0].shape[1], banner_width))
+        banner_draw = ImageDraw.Draw(banner)
+        banner_draw.text((0, 0), text)
+        return np.array(banner)
+
+    alice_banner = make_banner("Alice")
+    bob_banner = make_banner("Bob")
+    banner = np.column_stack((alice_banner, bob_banner))
+
+    alice_vid = np.array(a_env.video)
+    bob_vid = np.array(b_env.video)
+    alice_repeat = alice_vid[-1][None, ...].repeat(len(bob_vid), axis=0)
+    bob_repeat = bob_vid[-1][None, ...].repeat(len(alice_vid), axis=0)
+    alice_vid = np.concatenate(
+        (
+            banner[None, ...].repeat(len(alice_vid), axis=0),
+            np.concatenate((alice_vid, bob_repeat), axis=2),
+        ),
+        axis=1,
+    )
+    bob_vid = np.concatenate(
+        (
+            banner[None, ...].repeat(len(bob_vid), axis=0),
+            np.concatenate((alice_repeat, bob_vid), axis=2),
+        ),
+        axis=1,
+    )
+    frames = np.concatenate((alice_vid, bob_vid), axis=0)
+    vwrite(path, frames)
+
+    alice_obs = alice_batch["obs"]["observations"].detach().cpu().numpy()
+    bob_obs = bob_batch["obs"]["observations"].detach().cpu().numpy()
+    plt.plot(alice_obs[:, 0].squeeze(), alice_obs[:, 1].squeeze())
+    plt.plot(bob_obs[:, 0].squeeze(), bob_obs[:, 1].squeeze(), "grey", alpha=0.5)
+
+
+##########
+# TRAIN! #
+##########
+
+for i in range(args.num_pretrain):
+    logger.log("Pretraining: epoch {}".format(i))
+    alice_batch, bob_batch = sampler.sample()
+    alice_rb.add(alice_batch)
+    bob_rb.add(bob_batch)
+
+
+for i in range(args.num_epochs):
+    for _ in range(args.sample_repeats):
+        alice_batch, bob_batch = sampler.sample()
+        alice_rb.add(alice_batch)
+        bob_rb.add(bob_batch)
+
+    for j in range(args.alice_train_repeats):
+        # train sac
+        alice_batch = alice_rb.sample()
+        if args.use_q_fn:
+            obs = {k: v for k, v in alice_batch["obs"].items() if k != "diayn"}
+            with torch.no_grad():
+                act = bob_act.action(obs)
+                val = bob_crt.forward(obs, act)
+                val = val.sign() * val.abs().log1p()
+            alice_batch["rew"] = -val
+        alice_batch["rew"] += alice_diayn.calc_rewards(alice_batch["obs"])
+        alice_algo.update(alice_batch, j)
+
+    for j in range(args.bob_train_repeats):
+        bob_batch = bob_rb.sample()
+        bob_algo.update(bob_batch, j)
+
+        # train diayn
+        alice_batch = alice_rb.sample()
+        alice_diayn.train(alice_batch["obs"])
+
+    # eval diayn
+    obss = []
+    for _ in range(args.eval_repeats):
+        _, batch = alice_sampler.sample()
+        obss.append(batch["obs"])
+    obss = collate(obss)
+    alice_eval_diayn.calc_rewards(obss)
+    alice_eval_diayn.train(obss)
+
+    logger.epoch(i)
+
+    if (i + 1) % args.save_video_offset == 0:
+        # adversarial video
+        plt.cla()
+        if not args.continuous:
+            for j in range(args.num_skills):
+                write_adv_video_and_plot(i, j)
+        else:
+            for j in range(args.num_skills * 5):
+                write_adv_video_and_plot(i, j)
+        plt.xlim(-5, 5)
+        plt.ylim(-5, 5)
+        plt.savefig(logger.logdir / "plots" / f"adversarial_{i}.png")

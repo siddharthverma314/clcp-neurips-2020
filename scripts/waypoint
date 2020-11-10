@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+from adversarial.algo import DQN
+from adversarial.env import make_env, VideoWrapper
+from adversarial.actor import DqnActor
+from adversarial.critic import DqnCritic
+from adversarial.loaders import DiaynPolicy, AdversarialPolicy, DadsPolicy
+from pyrl.replay_buffer import ReplayBuffer
+from pyrl.sampler import BaseSampler
+from pyrl.logger import logger, Hyperparams
+from skvideo.io import vwrite
+import ant_hrl_maze
+import argparse
+import copy
+import gc
+
+import matplotlib
+
+matplotlib.use("agg")
+import matplotlib.pyplot as plt
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--logdir", type=str, required=True)
+parser.add_argument("--path-length", type=int, default=30)
+parser.add_argument("--hidden-dim", type=str, default="256,256")
+parser.add_argument("--num-pretrain", type=int, default=10)
+parser.add_argument("--num-epochs", type=int, default=500)
+parser.add_argument("--save-video-offset", type=int, default=20)
+parser.add_argument("--save-plot-offset", type=int, default=10)
+parser.add_argument("--exploration-epochs", type=int, default=100)
+parser.add_argument("--final-epsilon", type=float, default=1e-2)
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--num-samples", type=int, default=10)
+parser.add_argument("--train-repeats", type=int, default=200)
+parser.add_argument("--batch-size", type=int, default=256)
+parser.add_argument("--replay-buffer-size", type=int, default=int(1e3))
+parser.add_argument("--checkpoint-path", type=str, required=True)
+parser.add_argument("--replay-actions", action="store_true")
+parser.add_argument("--dont-offset-pos", action="store_true")
+parser.add_argument("--forward-steps", type=int, default=200)
+parser.add_argument("--backward-steps", type=int, default=0)
+
+parser.add_argument("--critic-target-update-frequency", type=int, default=10)
+parser.add_argument("--reward-scale", type=float, default=0.3)
+
+parser.add_argument("--big-waypoint", action="store_true")
+
+
+args = parser.parse_args()
+args.hidden_dim = [int(d) for d in args.hidden_dim.split(",")]
+
+
+if AdversarialPolicy.check(args.checkpoint_path):
+    policy = AdversarialPolicy(args.checkpoint_path, args.device)
+elif DiaynPolicy.check(args.checkpoint_path):
+    policy = DiaynPolicy(args.checkpoint_path, args.device)
+elif DadsPolicy.check(args.checkpoint_path):
+    policy = DadsPolicy(args.checkpoint_path, args.device)
+
+env = make_env(
+    "AntWaypointHierarchical-v4",
+    args.device,
+    env_args={"goal_size": 5 if args.big_waypoint else 2},
+    wrapper_args={
+        "policy": policy,
+        "replay_actions": args.replay_actions,
+        "forward_steps": args.forward_steps,
+        "backward_steps": args.backward_steps,
+        "offset_pos": not args.dont_offset_pos,
+    },
+)
+crt = DqnCritic(
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    hidden_dim=args.hidden_dim,
+    _device=args.device,
+)
+act = DqnActor(
+    critic=crt,
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    _device=args.device,
+)
+algo = DQN(
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    critic=crt,
+    _device=args.device,
+    _critic_target_update_frequency=args.critic_target_update_frequency,
+    _reward_scale=args.reward_scale,
+)
+
+sampler = BaseSampler(act.action, _path_length=args.path_length, env=env)
+rb = ReplayBuffer(
+    env.observation_space,
+    env.action_space,
+    args.replay_buffer_size,
+    args.batch_size,
+    args.device,
+)
+
+logger.initialize(
+    {
+        "dqn": algo,
+        "sampler": sampler,
+        "replay_buffer": rb,
+        "args": Hyperparams(vars(args)),
+    },
+    args.logdir,
+)
+logger.log_hyperparameters()
+(logger.logdir / "videos").mkdir()
+(logger.logdir / "plots").mkdir()
+
+for i in range(args.num_pretrain):
+    act.epsilon = 1
+    logger.log("Pretraining: epoch {}".format(i))
+    _, batch = sampler.sample()
+    rb.add(batch)
+
+for i in range(args.num_epochs):
+    if i < args.exploration_epochs:
+        act.epsilon = 1 - i * (1 - args.final_epsilon) / args.exploration_epochs
+    else:
+        act.epsilon = args.final_epsilon
+
+    for _ in range(args.num_samples):
+        _, batch = sampler.sample()
+        rb.add(batch)
+
+    for j in range(args.train_repeats):
+        algo.update(rb.sample(), j)
+    logger.epoch(i)
+
+    # write video
+    if args.save_video_offset and (i + 1) % args.save_video_offset == 0:
+        old_env = env.env.env.env
+        new_env = VideoWrapper(env.env.env.env)
+        env.env.env.env = new_env
+        vs = BaseSampler(
+            lambda x: act.action(x, True), _path_length=args.path_length, env=env
+        )
+        _, batch = vs.sample()
+        path = logger.logdir / "videos" / f"video_{i}.mp4"
+        logger.log("Saving video to path {}".format(path))
+        vwrite(path, new_env.get_video_and_clear())
+        env.env.env.env = old_env
+
+        # garbage collection
+        del new_env
+        gc.collect()
+
+    # save plot
+    if args.save_plot_offset and (i + 1) % args.save_plot_offset == 0:
+        obs = batch["obs"]["observations"].detach().cpu().numpy()
+        x, y = obs[:, 0], obs[:, 1]
+        plt.cla()
+        plt.plot(x, y, "r-")
+        plt.plot([g[0] for g in env.goals], [g[1] for g in env.goals], "g.")
+        plt.savefig(logger.logdir / "plots" / "plot_{}.png".format(i))
+
+        # garbage collection
+        plt.clf()
+        plt.close()
+        gc.collect()

@@ -1,0 +1,63 @@
+#+TITLE: Learning Skillful Resets
+
+* Overview
+This repository contains the code for the paper [[https://example.com][Learning Skillful
+Resets: Acquisition of Behaviors via Reset-Free Games]].
+
+* Running the baselines
+Run =python setup.py develop= within =ant-hrl-maze= if you are not
+using =Nix=.
+
+To run our code, run
+
+#+BEGIN_SRC shell
+./scripts/adv.py --env-name="AntResetFree-v4" --logdir=./log/ours_reset_free
+./scripts/adv.py --env-name="Ant-v4" --logdir=./log/ours_reset
+#+END_SRC
+
+To run the DIAYN baselines, run
+
+#+BEGIN_SRC shell
+./scripts/diayn.py --env-name="AntResetFree-v4" --logdir=./log/ours_reset_free
+./scripts/diayn.py --env-name="Ant-v4" --logdir=./log/ours_reset
+#+END_SRC
+
+To run the HRL experiments, run
+
+#+BEGIN_SRC shell
+./scripts/waypoint --checkpoint-path=./log/ours_reset_free/checkpoint.pkl --logdir=./log/ours_waypoint
+./scripts/waypoint --checkpoint-path=./log/ours_reset/checkpoint.pkl --logdir=./log/ours_waypoint
+
+./scripts/maze --checkpoint-path=./log/ours_reset_free/checkpoint.pkl --logdir=./log/ours_maze
+./scripts/maze --checkpoint-path=./log/ours_reset/checkpoint.pkl --logdir=./log/ours_maze
+#+END_SRC
+
+To run the HRL experiments for DIAYN or DADS, change the
+=checkpoint-path= to point to the =checkpoint.pkl= and =flags.txt=
+respectively.
+
+* How to run
+** Spawn a shell
+The easiest way to run the code is to use [[https://www.nixos.org][Nix]], the package
+manager. Download and install Nix from the website, and run
+=nix-shell= in the root directory. You will automatically have a shell
+with all the dependencies installed. In case cuda fails to work,
+install [[https://github.com/deepfire/nix-install-vendor-gl][nix-vendor-gl]] using the instructions on the GitHub or simply
+run =export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu= which is the
+path that has =libcuda.so=.
+
+In order to use =MuJoCo=, place the license key at
+=~/secrets/mjkey.txt=.
+
+In order to not recompile the libraries from scratch, install [[https://cachix.org/][cachix]]
+and run =cachix use pyrl=.
+
+You can also just use [[https://github.com/python-poetry/poetry][poetry]] and install the dependencies and take
+care of cuda yourself. You might need to run =poetry update=. Or, if
+you are feeling adventurous, manually install them by hand.
+
+** Build the Docker container
+Install nix, then run =make docker=. Or just run =docker pull
+siddharthverma/adversarial=. All scripts in the folder =./scripts= are
+installed as executables in the docker container. For example, run
+=docker run siddharthverma/adversarial adv --help=.

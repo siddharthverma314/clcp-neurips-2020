@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+
+from adversarial.env import make_env, VideoWrapper
+from adversarial.algo import SAC
+from pyrl.actor import TanhGaussianActor
+from pyrl.critic import DoubleQCritic
+from pyrl.replay_buffer import ReplayBuffer
+from pyrl.utils import Flatten
+from pyrl.sampler import BaseSampler
+from pyrl.logger import logger, Hyperparams
+from skvideo.io import vwrite
+import ant_hrl_maze
+import argparse
+import torch
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--env-name", type=str, default="HalfCheetah-v3")
+parser.add_argument("--logdir", type=str, required=True)
+parser.add_argument("--path-length", type=int, default=100)
+parser.add_argument("--actor-weight-decay", type=float, default=1e-2)
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--num-epochs", type=int, default=1000)
+parser.add_argument("--num-pretrain", type=int, default=50)
+parser.add_argument("--sample-repeats", type=int, default=10)
+parser.add_argument("--train-repeats", type=int, default=200)
+parser.add_argument("--batch-size", type=int, default=256)
+parser.add_argument("--hidden-dim", type=str, default="256,256")
+parser.add_argument("--save-video-offset", type=int, default=50)
+args = parser.parse_args()
+args.hidden_dim = [int(d) for d in args.hidden_dim.split(",")]
+
+env = make_env(args.env_name, args.device)
+act = TanhGaussianActor(env.observation_space, env.action_space, args.hidden_dim)
+crt = DoubleQCritic(env.observation_space, env.action_space, args.hidden_dim)
+algo = SAC(
+    actor=act,
+    critic=crt,
+    _device=args.device,
+    _act_dim=Flatten(env.action_space).dim,
+    _init_temperature=0.1,
+    _actor_weight_decay=args.actor_weight_decay,
+)
+
+sampler = BaseSampler(act.action, _path_length=args.path_length, env=env)
+rb = ReplayBuffer(
+    env.observation_space, env.action_space, int(1e6), args.batch_size, args.device
+)
+
+logger.initialize(
+    {
+        "sac": algo,
+        "sampler": sampler,
+        "replay_buffer": rb,
+        "args": Hyperparams(vars(args)),
+    },
+    args.logdir,
+)
+logger.log_hyperparameters()
+(logger.logdir / "videos").mkdir()
+
+for i in range(args.num_pretrain):
+    logger.log("Pretraining: epoch {}".format(i))
+    _, batch = sampler.sample()
+    rb.add(batch)
+
+for i in range(args.num_epochs):
+    for _ in range(args.sample_repeats):
+        _, batch = sampler.sample()
+        rb.add(batch)
+
+    for j in range(args.train_repeats):
+        algo.update(rb.sample(), j)
+    logger.epoch(i)
+
+    # write video
+    if (i + 1) % args.save_video_offset == 0:
+        new_env = VideoWrapper(env)
+        vs = BaseSampler(
+            lambda x: act.action(x, True), _path_length=args.path_length, env=new_env
+        )
+        _, batch = vs.sample()
+        path = logger.logdir / "videos" / f"video_{i}.mp4"
+        logger.log("Saving video to path {}".format(path))
+        vwrite(path, new_env.get_video_and_clear())

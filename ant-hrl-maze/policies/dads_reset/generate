@@ -1,0 +1,2 @@
+#!/bin/bash
+python /home/vsiddharth/research/dads/unsupervised_skill_learning/dads_recover.py --logdir /store/vsiddharth/baselines/DADS_Ant_reset/Ant-v4/ --flagfile /home/vsiddharth/research/dads/configs/ant_offpolicy.txt

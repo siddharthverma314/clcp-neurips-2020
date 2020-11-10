@@ -1,0 +1,33 @@
+#+TITLE: PyRL - Python Reinforcement Learning library
+#+AUTHOR: Siddharth Verma
+
+* What is PyRL?
+PyRL is an opinionated [[https://www.wikipedia.com/en/Reinforcement_learning][Reinforcement Learning]] framework for
+Python. PyRL aims to be as minimalist as possible, while providing all
+necessary tools to build an RL algorithm. PyRL is built using
+[[https://www.pytorch.org][PyTorch]].
+
+* How to install
+Clone this repository. The package dependencies are provided by
+[[https://nixos.org][Nix]]. Install Nix using the directions from the website, then run
+=nix-shell= to start a bash shell with all dependencies installed. It
+is recommended to install =cachix= and run =cachix use pyrl= to avoid
+re-building the package.
+
+If you would like to use MuJoCo, you will need the activation file
+=mjkey.txt=. Place this in =~/secrets/mjkey.txt=.
+
+If you would like to install the dependencies manually, they are
+listed in =derivation.nix=.
+
+* Components
+The structure of PyRL is as follows:
+
+| Package         | Contains                                             |
+|-----------------+------------------------------------------------------|
+| pyrl.actor      | Base Policies and a few implementations              |
+| pyrl.critic     | Q and Value functions                                |
+| pyrl.logger     | Logging based on torch.tensorboard                   |
+| pyrl.sampler    | Data Collection algorithms                           |
+| pyrl.transforms | Useful transformations like one_hot and flatten_dict |
+| pyrl.wrappers   | OpenAI Gym wrappers                                  |

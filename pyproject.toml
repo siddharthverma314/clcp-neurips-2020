@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "adversarial"
+version = "0.1.0"
+description = "Learning Skillful Resets"
+authors = ["Siddharth Verma <siddharthverma314@gmail.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+mujoco-py = { git = "https://github.com/siddharthverma314/mujoco-py.git", branch = "master" }
+gym = "^0.17.2"
+torch = "^1.5.1"
+tensorboard = "*"
+flatten-dict = "^0.3.0"
+pyrl = { path = "./pyrl" }
+scikit-video = "^1.1.11"
+ant-hrl-maze = { path = "./ant-hrl-maze" }
+matplotlib = "^3.3.0"
+
+[tool.poetry.dev-dependencies]
+python-language-server = "^0.33.3"
+pytest = "^5.4.3"
+ipdb = "^0.13.3"
+rope = "^0.17.0"
+pyflakes = "^2.2.0"
+black = "^19.10b0"
+pyls-black = "^0.4.4"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"

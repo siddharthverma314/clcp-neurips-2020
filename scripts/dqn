@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+
+from adversarial.env import make_env, VideoWrapper
+from adversarial.algo import DQN
+from adversarial.actor import DqnActor
+from adversarial.critic import DqnCritic
+from pyrl.replay_buffer import ReplayBuffer
+from pyrl.sampler import BaseSampler
+from pyrl.logger import logger, Hyperparams
+from skvideo.io import vwrite
+import ant_hrl_maze
+import argparse
+import torch
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--env-name", type=str, default="CartPole-v4")
+parser.add_argument("--logdir", type=str, required=True)
+parser.add_argument("--path-length", type=int, default=100)
+parser.add_argument("--hidden-dim", type=str, default="256,256")
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--batch-size", type=int, default=256)
+parser.add_argument("--num-pretrain", type=int, default=50)
+parser.add_argument("--sample-repeats", type=int, default=10)
+parser.add_argument("--train-repeats", type=int, default=200)
+parser.add_argument("--exploration-epochs", type=int, default=100)
+args = parser.parse_args()
+args.hidden_dim = [int(d) for d in args.hidden_dim.split(",")]
+
+env = make_env(args.env_name, args.device)
+crt = DqnCritic(
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    hidden_dim=args.hidden_dim,
+    _device=args.device,
+)
+act = DqnActor(
+    critic=crt,
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    _device=args.device,
+)
+algo = DQN(
+    obs_spec=env.observation_space,
+    act_spec=env.action_space,
+    critic=crt,
+    _device=args.device,
+)
+
+sampler = BaseSampler(act.action, _path_length=args.path_length, env=env)
+rb = ReplayBuffer(
+    env.observation_space, env.action_space, int(1e6), args.batch_size, args.device
+)
+
+logger.initialize(
+    {
+        "dqn": algo,
+        "sampler": sampler,
+        "replay_buffer": rb,
+        "args": Hyperparams(vars(args)),
+    },
+    args.logdir,
+)
+logger.log_hyperparameters()
+
+for i in range(args.num_pretrain):
+    act.epsilon = 1
+    logger.log("Pretraining: epoch {}".format(i))
+    _, batch = sampler.sample()
+    rb.add(batch)
+
+for i in range(1000):
+    if i < args.exploration_epochs:
+        act.epsilon = 1 - i / args.exploration_epochs
+
+    for _ in range(args.sample_repeats):
+        _, batch = sampler.sample()
+        rb.add(batch)
+
+    for j in range(args.train_repeats):
+        algo.update(rb.sample(), j)
+    logger.epoch(i)
