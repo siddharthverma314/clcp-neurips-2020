@@ -1,7 +1,7 @@
 #+TITLE: Learning Skillful Resets
 
 * Overview
-This repository contains the code for the paper [[https://example.com][Continual Learning of
+This repository contains the code for the paper [[https://arxiv.org/abs/2011.05286][Continual Learning of
 Control Primitives: Acquisition of Behaviors via Reset-Games]].
 
 * Running the baselines
